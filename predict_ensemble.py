@@ -309,15 +309,9 @@ def predict_ticket_ensemble():
     if rank_blend is not None:
         print(f"    Rank-percentile  {rank_blend*100:5.1f}%  <- this is the AUC-optimal blend")
 
-    # Verdict off the rank-percentile blend — AUC-optimal (§5.3).
-    # XGBoost is systematically overconfident due to scale_pos_weight, so
-    # prob_avg is pulled high on almost every ticket. The rank-blend is
-    # calibrated against each model's actual test-set distribution, making
-    # it a true percentile signal. Threshold 0.50 = "above median disputed
-    # ticket" which maps cleanly to "worth disputing".
-    verdict_prob = rank_blend if rank_blend is not None else prob_avg
-    RANK_THRESHOLD = 0.50
-    if verdict_prob >= RANK_THRESHOLD:
+    # Verdict off the probability average (most interpretable as "chance")
+    verdict_prob = prob_avg
+    if verdict_prob >= DISPUTE_THRESHOLD:
         verdict = "Worth disputing"
         advice = "Gather evidence (photos, receipts, signage) and submit a dispute."
     else:
@@ -332,11 +326,11 @@ def predict_ticket_ensemble():
     elif actually_won:
         print("  Actual outcome:   WON")
         print(f"  Ensemble was:     "
-              f"{'CORRECT' if verdict_prob >= RANK_THRESHOLD else 'WRONG'}")
+              f"{'CORRECT' if verdict_prob >= DISPUTE_THRESHOLD else 'WRONG'}")
     else:
         print("  Actual outcome:   LOST")
         print(f"  Ensemble was:     "
-              f"{'CORRECT' if verdict_prob < RANK_THRESHOLD else 'WRONG'}")
+              f"{'CORRECT' if verdict_prob < DISPUTE_THRESHOLD else 'WRONG'}")
     print(f"{'-'*56}\n")
 
     return {"catboost": prob_cb, "lightgbm": prob_lgb, "xgboost": prob_xgb,
