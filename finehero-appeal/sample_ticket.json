@@ -1,0 +1,17 @@
+{
+  "summons_number": "8901234567",
+  "violation_code": "40",
+  "violation_description": "No Standing - Street Cleaning",
+  "issue_date": "2024-11-15",
+  "violation_time": "0812A",
+  "fine_amount": "65",
+  "precinct": "10",
+  "county": "NY",
+  "issuing_agency": "TRAFFIC",
+  "street_address": "245 W 23rd St",
+  "plate": "ABC1234",
+  "plate_state": "NY",
+  "vehicle_year": "2019",
+  "vehicle_make": "Toyota",
+  "vehicle_color": "Silver"
+}

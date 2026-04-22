@@ -1,0 +1,26 @@
+# ---- Datasets & model artifacts (too big / not source code) ----
+data/
+models/
+catboost_info/
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# ---- IDE / Claude state ----
+.claude/
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# ---- Generated outputs ----
+finehero-appeal/output/
+finehero-appeal/evidence_samples/
+
+# ---- Nested duplicate of this folder (stale) ----
+finehero-ml/
