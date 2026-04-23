@@ -139,6 +139,80 @@ def probe_target_shuffle(X, y, cat_features, meta, task_type):
     return float(cb.get_best_score()["validation"]["AUC"])
 
 
+def probe_target_shuffle_stratified(X, y, cat_features, meta, task_type):
+    """(2b) Tier-0-gate companion to probe_target_shuffle.
+
+    The unstratified target-shuffle probe shuffles y within fiscal year only.
+    That preserves year-level win-rate differences, so any feature that encodes
+    year INDIRECTLY (notably the cumulative prior-count features, which are
+    monotone non-decreasing in calendar time) lets a model rank across years
+    even when per-row labels are randomized. The result is AUC > 0.5 from
+    year-structural signal rather than per-row feature-label leakage — a
+    known blind spot of the basic probe.
+
+    This stratified variant shuffles y within (fiscal year x plate-count
+    quartile) cells. Inside each cell, both year AND the approximate
+    cumulative-count level are fixed, so any AUC remaining above 0.5 must
+    come from per-row label signal that survives conditioning on those two
+    year-confounded dimensions — that is, actual per-row leakage.
+
+    Gate interpretation (docs/auc_improvement_plan.md):
+      - Stratified AUC ~ 0.50-0.52  -> original 0.5825 was year-structural.
+        No per-row leakage. Tier 0 gate passes on a stronger probe.
+      - Stratified AUC > 0.52        -> per-row leakage confirmed beyond
+        (year, count) conditioning. Stop and investigate.
+    """
+    if meta is None or "issue_date" not in meta.columns:
+        print("    [skipped] no issue_date in meta")
+        return None
+    if "plate_prior_ticket_count" not in X.columns:
+        print("    [skipped] no plate_prior_ticket_count in X")
+        return None
+
+    years = pd.to_datetime(meta["issue_date"], errors="coerce").dt.year.fillna(-1).astype(int).values
+    counts = X["plate_prior_ticket_count"].to_numpy()
+
+    # Per-year quartiles so each year's boundaries match that year's
+    # count distribution (a single global set of quartiles would make the
+    # year signal leak through the per-year cell boundaries).
+    quartiles = np.full(len(counts), -1, dtype=int)
+    for yr in np.unique(years):
+        mask = years == yr
+        if mask.sum() == 0:
+            continue
+        try:
+            q = pd.qcut(counts[mask], q=4, labels=False, duplicates="drop")
+            quartiles[mask] = np.asarray(q, dtype=int)
+        except ValueError:
+            # All counts tied in this year -> one bucket
+            quartiles[mask] = 0
+
+    # Shuffle y within (year, quartile) cells.
+    y_sh = y.copy()
+    rng = np.random.default_rng(42)
+    cell_sizes: list[int] = []
+    for yr in np.unique(years):
+        for qv in np.unique(quartiles[years == yr]):
+            mask = (years == yr) & (quartiles == qv)
+            n = int(mask.sum())
+            if n < 2:
+                continue
+            cell_sizes.append(n)
+            perm = rng.permutation(y_sh[mask])
+            y_sh[mask] = perm
+    if cell_sizes:
+        print(f"    stratified into {len(cell_sizes)} (year x count-quartile) cells "
+              f"(min={min(cell_sizes):,}, median={int(np.median(cell_sizes)):,}, "
+              f"max={max(cell_sizes):,})")
+
+    sss = StratifiedShuffleSplit(n_splits=1, test_size=0.20, random_state=42)
+    tr, te = next(sss.split(X, y_sh))
+    cb = _fit_fast(X.iloc[tr].reset_index(drop=True), y_sh[tr],
+                   X.iloc[te].reset_index(drop=True), y_sh[te],
+                   cat_features, task_type)
+    return float(cb.get_best_score()["validation"]["AUC"])
+
+
 def probe_time_shift(X, y, cat_features, task_type):
     """(3) Sensitivity check: swap plate_prior_win_rate with the target-leaked
     version (= y itself scaled + noise). This is the probe confirming that the
@@ -284,6 +358,24 @@ def write_report(results, n_rows, task_type):
         shuffle_auc_str = f"{shuffle_auc:.4f}"
         shuffle_verdict = f"FAIL — AUC {shuffle_auc:.4f} deviates from 0.5 (leakage suspected)"
 
+    shuffle_strat_auc = results.get("target_shuffle_stratified_auc")
+    if shuffle_strat_auc is None:
+        shuffle_strat_auc_str = "_skipped_"
+        shuffle_strat_verdict = "_skipped_"
+    elif 0.47 <= shuffle_strat_auc <= 0.53:
+        shuffle_strat_auc_str = f"{shuffle_strat_auc:.4f}"
+        shuffle_strat_verdict = (
+            "PASS — AUC ≈ 0.5 after conditioning on (year × plate-count quartile). "
+            "Any residual in the unstratified probe was year-structural signal, not per-row leakage."
+        )
+    else:
+        shuffle_strat_auc_str = f"{shuffle_strat_auc:.4f}"
+        shuffle_strat_verdict = (
+            f"FAIL — stratified AUC {shuffle_strat_auc:.4f} deviates from 0.5 "
+            f"even after conditioning on (year × plate-count quartile). "
+            f"Per-row feature-label leakage beyond year confound is likely."
+        )
+
     ts_auc = results.get("time_shift_auc")
     if ts_auc is None:
         ts_auc_str = "_skipped_"
@@ -370,6 +462,13 @@ Shuffle `y` within each fiscal year, retrain. A leak-free pipeline returns AUC �
 - Result: AUC = {shuffle_auc_str}
 - Status: {shuffle_verdict}
 
+### Probe 1b — Stratified target-shuffle (year × plate-count quartile)
+
+The unstratified probe leaves the `plate_prior_*` cumulative counts encoding year indirectly — so AUC > 0.5 can come from the model inferring year rather than from real leakage. This variant shuffles `y` within (fiscal year × per-year plate-count quartile) cells. Any remaining AUC > 0.5 must come from per-row feature-label signal that survives conditioning on year AND count level.
+
+- Result: AUC = {shuffle_strat_auc_str}
+- Status: {shuffle_strat_verdict}
+
 ## Probe 2 — Time-shift sensitivity probe
 
 Replace `plate_prior_win_rate` with a deliberately-leaky version (`y * 0.8 + noise`) and retrain. Confirms the probe machinery is sensitive enough to detect a leak.
@@ -452,6 +551,13 @@ def main():
     with timed("Probe 2: target-shuffle within year"):
         results["target_shuffle_auc"] = probe_target_shuffle(X, y, cat_features, meta, task_type)
         print(f"    AUC = {results['target_shuffle_auc']:.4f}")
+
+    with timed("Probe 2b: target-shuffle within (year x count-quartile)"):
+        results["target_shuffle_stratified_auc"] = probe_target_shuffle_stratified(
+            X, y, cat_features, meta, task_type
+        )
+        if results["target_shuffle_stratified_auc"] is not None:
+            print(f"    AUC = {results['target_shuffle_stratified_auc']:.4f}")
 
     with timed("Probe 3: time-shift sensitivity"):
         results["time_shift_auc"] = probe_time_shift(X, y, cat_features, task_type)
