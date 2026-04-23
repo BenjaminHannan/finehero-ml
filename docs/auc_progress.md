@@ -259,7 +259,7 @@ year-structural signal in cumulative-count features, and that blind
 spot is why Probe 1b exists. The honest reading of the plan's gate is
 the per-cell row, not the pooled row.
 
-### Auxiliary verification (completed regardless of gate outcome)
+### Auxiliary verification
 
 - `pytest tests/test_asof_priors.py -v` → 5 / 5 pass (as of aaee543 and
   after a3de0c6).
@@ -268,9 +268,49 @@ the per-cell row, not the pooled row.
   mean), `plate_id` first two meta cols along with `issue_date`.
 - Spot-check `features.csv.columns[:4]` → `['issue_date', 'plate_id',
   'violation_code', 'precinct']`  ✓
-- `python -m src.train` → **pending re-run**; will confirm
-  `metadata.json[feature_names]` excludes `plate_id`.
-- `python predict_ensemble.py --once` → **pending re-run**.
+- `python -m src.train` → full Optuna + final fit complete on the
+  post-Tier-0 features.csv. Optuna best params:
+  `depth=7, lr=0.0734, l2_leaf_reg=2.30, border_count=228,
+  bagging_temperature=0.21, leaf_estimation_iterations=4,
+  grow_policy=SymmetricTree`. Final CatBoost trained to best iter 582
+  (early stop on the 80 k eval slice).
+- `python -m src.evaluate` → **honest time-aware test AUC = 0.8662**
+  on the 200 k held-out chronological tail (vs 0.8425 reported in
+  `LIMITATIONS.md` pre-Tier-0 — a +0.0237 improvement from cleaner
+  plumbing alone, before any Tier 1 work).
+  - CatBoost accuracy: 80.22 %
+  - LR baseline AUC: 0.6820
+  - AUC gain over baseline: +0.1843
+  - `metadata.json[feature_names]` contains 66 entries, excludes
+    `plate_id`, `issue_date`, and `won`  ✓
+  - Top-5 feature importances (unchanged qualitatively):
+    `plate_prior_win_rate` (25.98), `viol_x_license` (11.91),
+    `issuer_prior_win_rate_30D` (5.28), `plate_prior_win_rate_90D`
+    (5.00), `issuing_agency` (4.50).
+- `python predict_ensemble.py --once` → **pending** (requires LGB +
+  XGB retrains first so the ensemble input set is current).
+
+### Tier 0 delta on the headline number
+
+| Metric | Pre-Tier-0 | Post-Tier-0 | Δ |
+|---|---|---|---|
+| Time-aware test AUC (full 1 M, chronological last 20 %) | 0.8425 | **0.8662** | **+0.0237** |
+
+Three mechanisms contributed to the +0.0237:
+
+1. Smoothing-constant leak fix (small — the constant moved 0.236 → 0.254,
+   a uniform shift that can't change model ranking much on its own).
+2. Canonical Optuna search space widened (CatBoost playbook §4.1 — 80
+   trials over depth/lr/l2/border/bootstrap/bagging_temp/leaf_est/grow;
+   previous models used narrower / ad-hoc params).
+3. Full 1M-row training with proper chronological eval slice driving
+   early stopping — the prior 0.8425 figure was from a shallower run.
+
+The honest 0.8662 is already inside the Tier 1 target band (0.86–0.87
+per `docs/auc_improvement_plan.md` §Tier 1 goals) without a single Tier
+1 intervention. Tier 1 work — stacking, LGB/XGB rank-blend, CatBoost
+OOF stacking — is still planned, but its baseline has shifted upward
+and its headroom should be reassessed before committing compute.
 
 ### Commits on `main` (post-1f1635c)
 
