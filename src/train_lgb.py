@@ -51,7 +51,7 @@ def main():
     print(f"  Train: {len(tr_df):,}  |  Eval: {len(ev_df):,}  |  Test: {len(te_df):,}")
 
     y_tr, y_ev, y_te = tr_df["won"].values, ev_df["won"].values, te_df["won"].values
-    drop_cols = ["won", "issue_date"]
+    drop_cols = ["won", "issue_date", "plate_id"]
     X_tr = tr_df.drop(columns=[c for c in drop_cols if c in tr_df.columns])
     X_ev = ev_df.drop(columns=[c for c in drop_cols if c in ev_df.columns])
     X_te = te_df.drop(columns=[c for c in drop_cols if c in te_df.columns])

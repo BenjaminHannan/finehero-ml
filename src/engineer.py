@@ -395,7 +395,18 @@ def engineer_features() -> None:
     agency_col     = _pick_col(df, "issuing_agency") or _find_col(df, "agency")
     license_col    = _pick_col(df, "license_type", "plate_type")
     state_col      = _pick_col(df, "state", "registration_state")
-    plate_col      = _pick_col(df, "plate", "plate_id")
+    # Canonicalize plate into a single `plate_id` column (uppercase-stripped).
+    # Used BOTH for prior-history aggregation AND written out as a meta column
+    # so the audit script can do real plate-blocked GroupKFold (Tier 0.2).
+    _raw_plate = _pick_col(df, "plate", "plate_id")
+    if _raw_plate:
+        df["plate_id"] = (
+            df[_raw_plate].astype(str).str.strip().str.upper()
+            .replace({"NAN": "UNKNOWN", "NONE": "UNKNOWN", "": "UNKNOWN"})
+        )
+        plate_col = "plate_id"
+    else:
+        plate_col = None
     vtime_col      = _find_col(df, "violation_time")
     date_col       = _find_col(df, "issue_date")
     fine_col       = _pick_col(df, "fine_amount")
@@ -588,13 +599,17 @@ def engineer_features() -> None:
     print(f"  Cat features list saved -> {CAT_FEATURES_PATH}  "
           f"({len(cat_features)} cat, {len(numeric_features)} num)")
 
-    # Preserve issue_date as a META column (not a feature). train.py and
-    # predict.py must drop it before fitting. The audit script uses it for
-    # time-aware splits and leakage probes.
+    # Preserve issue_date AND plate_id as META columns (not features).
+    # train.py / train_lgb.py / train_xgb.py and predict.py must drop them
+    # before fitting. The audit script uses issue_date for time-aware splits
+    # and plate_id for real plate-blocked GroupKFold (Tier 0.2: replaces the
+    # old proxy grouping built from plate_prior_ticket_count + win_rate).
     meta_cols = []
     if date_col:
         df["issue_date"] = pd.to_datetime(df[date_col], errors="coerce").dt.strftime("%Y-%m-%d")
         meta_cols.append("issue_date")
+    if plate_col and plate_col in df.columns:
+        meta_cols.append(plate_col)  # plate_col == "plate_id" by construction above
 
     feature_cols = meta_cols + cat_features + numeric_features + ["won"]
     features = df[feature_cols].copy()

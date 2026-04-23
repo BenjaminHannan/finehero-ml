@@ -39,7 +39,7 @@ EARLY_STOP   = 100
 # with per-plate features. Expected to lower reported AUC vs random split.
 USE_TIME_AWARE_SPLIT = True
 
-META_COLS = ["issue_date"]  # columns present in features.csv that are NOT model features
+META_COLS = ["issue_date", "plate_id"]  # columns present in features.csv that are NOT model features
 
 
 def _fit_catboost(X_tr, y_tr, X_ev, y_ev, cat_features, params, iters, verbose=0,

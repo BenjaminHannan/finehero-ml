@@ -75,7 +75,7 @@ def main():
     cat_features = [c for c in cat_features if c in df.columns]
 
     y = df["won"].values.astype(int)
-    drop_cols = [c for c in ("won", "issue_date") if c in df.columns]
+    drop_cols = [c for c in ("won", "issue_date", "plate_id") if c in df.columns]
     X = df.drop(columns=drop_cols)
     for c in cat_features:
         X[c] = X[c].fillna("UNKNOWN").astype(str)

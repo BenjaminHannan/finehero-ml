@@ -63,7 +63,10 @@ def _load(subsample=SUBSAMPLE, full=False):
 
 def _prep(df, cat_features):
     cat_features = [c for c in cat_features if c in df.columns]
-    meta_cols = [c for c in ("issue_date",) if c in df.columns]
+    # `plate_id` is a meta column (not a model feature) per Tier 0.2 —
+    # engineered in src/engineer.py specifically so the plate-blocked probe
+    # can do a real GroupKFold instead of the old proxy-grouping.
+    meta_cols = [c for c in ("issue_date", "plate_id") if c in df.columns]
     X = df.drop(columns=["won"] + meta_cols)
     y = df["won"].astype(int).values
     meta = df[meta_cols].copy() if meta_cols else None
@@ -178,35 +181,26 @@ def probe_ablation(X, y, cat_features, baseline_auc, task_type):
     return results
 
 
-def probe_plate_blocked(df, X, y, cat_features, task_type):
-    """(5) GroupKFold by plate_id. If AUC drops materially vs random split,
-    the model is memorizing plates."""
-    plate_col = None
-    raw = None
-    if os.path.exists(VIOLATIONS_PATH):
-        try:
-            raw = pd.read_csv(VIOLATIONS_PATH, usecols=lambda c: "plate" in c.lower(),
-                              nrows=0)
-            for c in raw.columns:
-                if c.lower() in ("plate", "plate_id"):
-                    plate_col = c
-                    break
-        except Exception:
-            pass
-    if plate_col is None:
-        # Fall back: use a cheap proxy — plate_prior_ticket_count+plate_prior_win_rate combo
-        # won't be unique per plate but gives coarse grouping
-        if "plate_prior_ticket_count" not in X.columns:
-            return None
-        groups = (X["plate_prior_ticket_count"].astype(int).astype(str) + "_" +
-                  X["plate_prior_win_rate"].round(3).astype(str)).values
-        note = "PROXY groups (plate_prior_* combo) — real plate column unavailable here"
-    else:
-        # We'd need to load the full violations file aligned to features.csv rows,
-        # which we don't have. Use the proxy.
-        groups = (X["plate_prior_ticket_count"].astype(int).astype(str) + "_" +
-                  X["plate_prior_win_rate"].round(3).astype(str)).values
-        note = "PROXY groups (plate_prior_* combo) — feature alignment with raw plate skipped"
+def probe_plate_blocked(meta, X, y, cat_features, task_type):
+    """(5) GroupKFold by real plate_id. If AUC drops materially vs random
+    split, the model is memorizing plates.
+
+    Tier 0.2: uses the `plate_id` meta column written by src/engineer.py
+    (canonical uppercase-stripped value) as the true grouping. The old
+    PROXY-grouping fallback (plate_prior_ticket_count+win_rate combo) is
+    gone — if plate_id isn't in meta, we return None and tell the user
+    to rerun engineer.
+    """
+    if meta is None or "plate_id" not in meta.columns:
+        print("    [skipped] plate_id not in meta — rerun `python -m src.engineer` "
+              "to regenerate features.csv with the plate_id meta column (Tier 0.2).")
+        return None
+
+    groups = meta["plate_id"].astype(str).values
+    n_groups = pd.Series(groups).nunique()
+    note = (f"real plate_id ({n_groups:,} unique plates across {len(groups):,} rows) — "
+            f"Tier 0.2 true plate-blocked GroupKFold")
+    print(f"    {note}")
 
     gkf = GroupKFold(n_splits=5)
     aucs = []
@@ -216,9 +210,10 @@ def probe_plate_blocked(df, X, y, cat_features, task_type):
                        cat_features, task_type, iters=200)
         auc = float(cb.get_best_score()["validation"]["AUC"])
         aucs.append(auc)
-        print(f"    fold {fold+1}  auc={auc:.4f}")
+        print(f"    fold {fold+1}  auc={auc:.4f}  "
+              f"(train={len(tr):,}, test={len(te):,})")
     return {"mean": float(np.mean(aucs)), "std": float(np.std(aucs)),
-            "folds": aucs, "note": note}
+            "folds": aucs, "note": note, "n_groups": int(n_groups)}
 
 
 def probe_time_aware(X, y, meta, cat_features, task_type):
@@ -467,7 +462,7 @@ def main():
             print(f"    AUC = {results['time_aware_auc']:.4f}")
 
     with timed("Probe 5: plate-blocked 5-fold CV"):
-        results["plate_blocked"] = probe_plate_blocked(df, X, y, cat_features, task_type)
+        results["plate_blocked"] = probe_plate_blocked(meta, X, y, cat_features, task_type)
 
     with timed("Probe 6: prior-stat drift"):
         results["prior_drift"] = prior_stat_drift(X, y, meta)
