@@ -65,7 +65,8 @@ def main():
     if "issue_date" not in df.columns:
         raise RuntimeError("features.csv lacks issue_date — re-run src/engineer.py first")
 
-    df = df.iloc[pd.to_datetime(df["issue_date"], errors="coerce").argsort()].reset_index(drop=True)
+    _dt = pd.to_datetime(df["issue_date"], errors="coerce")
+    df = df.iloc[_dt.sort_values(kind="mergesort", na_position="first").index].reset_index(drop=True)
 
     if args.subsample and args.subsample < len(df):
         df = df.iloc[:args.subsample].reset_index(drop=True)

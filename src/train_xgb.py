@@ -27,7 +27,8 @@ EARLY_STOP    = 100
 
 
 def _time_aware_split(df, test_frac=0.20, eval_frac_of_train=0.10):
-    order = pd.to_datetime(df["issue_date"], errors="coerce").argsort()
+    _dt = pd.to_datetime(df["issue_date"], errors="coerce")
+    order = _dt.sort_values(kind="mergesort", na_position="first").index
     df = df.iloc[order].reset_index(drop=True)
     n = len(df)
     cut  = int(n * (1 - test_frac))

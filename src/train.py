@@ -138,7 +138,8 @@ def train_models() -> None:
 
     if USE_TIME_AWARE_SPLIT and meta is not None and "issue_date" in meta.columns:
         print("  Splitting chronologically by issue_date (last 20% = test)...")
-        order = pd.to_datetime(meta["issue_date"], errors="coerce").argsort()
+        _dt = pd.to_datetime(meta["issue_date"], errors="coerce")
+        order = _dt.sort_values(kind="mergesort", na_position="first").index
         X = X.iloc[order].reset_index(drop=True)
         y = y.iloc[order].reset_index(drop=True)
         cut = int(len(X) * 0.80)

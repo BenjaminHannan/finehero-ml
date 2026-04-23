@@ -220,7 +220,8 @@ def probe_time_aware(X, y, meta, cat_features, task_type):
     """(6) Chronological split: last 20% by issue_date as test."""
     if meta is None or "issue_date" not in meta.columns:
         return None
-    order = pd.to_datetime(meta["issue_date"], errors="coerce").argsort().values
+    _dt = pd.to_datetime(meta["issue_date"], errors="coerce")
+    order = _dt.sort_values(kind="mergesort", na_position="first").index.to_numpy()
     X_s = X.iloc[order].reset_index(drop=True)
     y_s = y[order]
     cut = int(len(X_s) * 0.80)
@@ -244,7 +245,8 @@ def prior_stat_drift(X, y, meta):
     }
     ta = None
     if meta is not None and "issue_date" in meta.columns:
-        order = pd.to_datetime(meta["issue_date"], errors="coerce").argsort().values
+        _dt = pd.to_datetime(meta["issue_date"], errors="coerce")
+        order = _dt.sort_values(kind="mergesort", na_position="first").index.to_numpy()
         X_s = X.iloc[order].reset_index(drop=True)
         cut = int(len(X_s) * 0.80)
         ta = {
@@ -410,7 +412,7 @@ If a plate's `plate_prior_ticket_count` distribution looks very different in tra
 - All probes use a {n_rows:,}-row subsample for speed. Run with `--full` for the complete dataset.
 - CatBoost fit: {FAST_ITERS} iters max, early-stop {FAST_EARLY_STOP}, depth 6, lr 0.08.
 - The target-shuffle probe and time-shift sensitivity probe together bound the pipeline's leakage: former detects label leakage, latter confirms the detector works.
-- The plate-blocked probe uses a PROXY grouping (combination of plate_prior_ticket_count + plate_prior_win_rate) because the raw plate column is not preserved in `features.csv`. For a fully rigorous audit, re-engineer to pass `plate_id` through as a meta column.
+- The plate-blocked probe uses the real `plate_id` meta column written by `src/engineer.py` (Tier 0.2). Each of 5 folds holds out a disjoint slice of plates.
 
 ## What this audit does NOT do
 

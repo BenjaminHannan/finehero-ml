@@ -529,9 +529,10 @@ def engineer_features() -> None:
         # Smoothing constant: mean of `won` over the CHRONOLOGICAL 80% training
         # slice only. Using the full-dataset mean would leak label info from the
         # eventual test slice into every row's smoothed prior via the
-        # (k * global_mean) term. argsort places NaT at the end, so order[:cut]
-        # is the earliest 80% of valid-dated rows.
-        _order = pd.to_datetime(df[date_col], errors="coerce").argsort().values
+        # (k * global_mean) term. NaT-dated rows are placed FIRST (train side)
+        # because they have no meaningful temporal ordering.
+        _dt    = pd.to_datetime(df[date_col], errors="coerce")
+        _order = _dt.sort_values(kind="mergesort", na_position="first").index.to_numpy()
         _cut   = int(len(df) * 0.80)
         global_mean = float(df["won"].iloc[_order[:_cut]].mean())
         print(f"  Smoothing global_mean (train-slice 80%): {global_mean:.6f}  "
