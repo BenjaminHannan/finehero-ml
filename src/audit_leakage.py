@@ -140,7 +140,7 @@ def probe_target_shuffle(X, y, cat_features, meta, task_type):
 
 
 def probe_target_shuffle_stratified(X, y, cat_features, meta, task_type):
-    """(2b) Tier-0-gate companion to probe_target_shuffle.
+    """(2b) Per-cell target-shuffle companion to probe_target_shuffle.
 
     The unstratified target-shuffle probe shuffles y within fiscal year only.
     That preserves year-level win-rate differences, so any feature that encodes
@@ -150,17 +150,26 @@ def probe_target_shuffle_stratified(X, y, cat_features, meta, task_type):
     year-structural signal rather than per-row feature-label leakage — a
     known blind spot of the basic probe.
 
-    This stratified variant shuffles y within (fiscal year x plate-count
-    quartile) cells. Inside each cell, both year AND the approximate
-    cumulative-count level are fixed, so any AUC remaining above 0.5 must
-    come from per-row label signal that survives conditioning on those two
-    year-confounded dimensions — that is, actual per-row leakage.
+    This variant:
+      1. Shuffles y within (fiscal year x per-year plate-count quartile) cells.
+      2. Trains on 80% of the shuffled data.
+      3. Computes AUC WITHIN EACH TEST CELL separately — not pooled.
 
-    Gate interpretation (docs/auc_improvement_plan.md):
-      - Stratified AUC ~ 0.50-0.52  -> original 0.5825 was year-structural.
-        No per-row leakage. Tier 0 gate passes on a stronger probe.
-      - Stratified AUC > 0.52        -> per-row leakage confirmed beyond
-        (year, count) conditioning. Stop and investigate.
+    Why per-cell: pooled AUC after within-cell shuffle is CONFOUNDED, because
+    it still rewards cross-cell ranking that is driven by stable cell-level
+    base rates + features that encode the cell (year + count level). Per-cell
+    AUC isolates within-cell ranking ability, which is the only thing that
+    can survive an honest within-cell shuffle if there is no per-row leakage.
+
+    Gate interpretation (docs/auc_improvement_plan.md Tier 0.1):
+      - Weighted-mean per-cell AUC ~ 0.50 AND max per-cell AUC <= ~0.55
+        -> original 0.5825 pooled signal was purely cell-level / year-
+           structural. No per-row leakage. Tier 0 gate passes.
+      - Weighted-mean per-cell AUC > 0.52 OR max per-cell AUC > 0.55
+        -> per-row leakage confirmed beyond (year, count) conditioning.
+           Stop and investigate.
+
+    Returns a dict with per-cell diagnostics, or None if inputs are missing.
     """
     if meta is None or "issue_date" not in meta.columns:
         print("    [skipped] no issue_date in meta")
@@ -187,19 +196,21 @@ def probe_target_shuffle_stratified(X, y, cat_features, meta, task_type):
             # All counts tied in this year -> one bucket
             quartiles[mask] = 0
 
+    # Unique integer cell id = year*10 + quartile (quartiles are 0..3).
+    cell_ids = years.astype(np.int64) * 10 + quartiles.astype(np.int64)
+
     # Shuffle y within (year, quartile) cells.
     y_sh = y.copy()
     rng = np.random.default_rng(42)
     cell_sizes: list[int] = []
-    for yr in np.unique(years):
-        for qv in np.unique(quartiles[years == yr]):
-            mask = (years == yr) & (quartiles == qv)
-            n = int(mask.sum())
-            if n < 2:
-                continue
-            cell_sizes.append(n)
-            perm = rng.permutation(y_sh[mask])
-            y_sh[mask] = perm
+    for cid in np.unique(cell_ids):
+        mask = cell_ids == cid
+        n = int(mask.sum())
+        if n < 2:
+            continue
+        cell_sizes.append(n)
+        perm = rng.permutation(y_sh[mask])
+        y_sh[mask] = perm
     if cell_sizes:
         print(f"    stratified into {len(cell_sizes)} (year x count-quartile) cells "
               f"(min={min(cell_sizes):,}, median={int(np.median(cell_sizes)):,}, "
@@ -210,7 +221,57 @@ def probe_target_shuffle_stratified(X, y, cat_features, meta, task_type):
     cb = _fit_fast(X.iloc[tr].reset_index(drop=True), y_sh[tr],
                    X.iloc[te].reset_index(drop=True), y_sh[te],
                    cat_features, task_type)
-    return float(cb.get_best_score()["validation"]["AUC"])
+    pooled_auc = float(cb.get_best_score()["validation"]["AUC"])
+
+    # --- Per-cell AUC on the test set (the honest metric) ---
+    probs_te = cb.predict_proba(X.iloc[te].reset_index(drop=True))[:, 1]
+    y_te = y_sh[te]
+    cell_te = cell_ids[te]
+
+    MIN_CELL = 200  # need enough rows for stable AUC
+    per_cell: list[dict] = []
+    for cid in np.unique(cell_te):
+        mask = cell_te == cid
+        n = int(mask.sum())
+        if n < MIN_CELL:
+            continue
+        yy = y_te[mask]
+        # Both classes must be present for AUC to be defined
+        if yy.min() == yy.max():
+            continue
+        cell_auc = float(roc_auc_score(yy, probs_te[mask]))
+        yr = int(cid // 10)
+        qv = int(cid % 10)
+        per_cell.append({"year": yr, "quartile": qv, "n": n,
+                          "pos_rate": float(yy.mean()), "auc": cell_auc})
+
+    if not per_cell:
+        print("    [warn] no evaluable test cells (all too small or single-class)")
+        return {"pooled_auc": pooled_auc, "per_cell_mean": None,
+                "per_cell_weighted_mean": None, "per_cell_max": None,
+                "n_cells_evaluable": 0, "cells": []}
+
+    aucs = np.array([c["auc"] for c in per_cell], dtype=float)
+    ns   = np.array([c["n"]   for c in per_cell], dtype=float)
+    mean_auc   = float(aucs.mean())
+    wmean_auc  = float(np.average(aucs, weights=ns))
+    max_auc    = float(aucs.max())
+    min_auc    = float(aucs.min())
+
+    print(f"    pooled AUC (confounded) = {pooled_auc:.4f}")
+    print(f"    per-cell AUC — evaluable cells: {len(per_cell)}  "
+          f"weighted-mean: {wmean_auc:.4f}  min: {min_auc:.4f}  max: {max_auc:.4f}")
+    for c in sorted(per_cell, key=lambda d: (d["year"], d["quartile"])):
+        print(f"      year={c['year']} q={c['quartile']}  n={c['n']:>6,}  "
+              f"pos={c['pos_rate']:.3f}  auc={c['auc']:.4f}")
+
+    return {"pooled_auc": pooled_auc,
+            "per_cell_mean": mean_auc,
+            "per_cell_weighted_mean": wmean_auc,
+            "per_cell_max": max_auc,
+            "per_cell_min": min_auc,
+            "n_cells_evaluable": len(per_cell),
+            "cells": per_cell}
 
 
 def probe_time_shift(X, y, cat_features, task_type):
@@ -358,23 +419,55 @@ def write_report(results, n_rows, task_type):
         shuffle_auc_str = f"{shuffle_auc:.4f}"
         shuffle_verdict = f"FAIL — AUC {shuffle_auc:.4f} deviates from 0.5 (leakage suspected)"
 
-    shuffle_strat_auc = results.get("target_shuffle_stratified_auc")
-    if shuffle_strat_auc is None:
-        shuffle_strat_auc_str = "_skipped_"
+    shuffle_strat = results.get("target_shuffle_stratified")
+    if shuffle_strat is None:
+        shuffle_strat_block = "_skipped_"
         shuffle_strat_verdict = "_skipped_"
-    elif 0.47 <= shuffle_strat_auc <= 0.53:
-        shuffle_strat_auc_str = f"{shuffle_strat_auc:.4f}"
-        shuffle_strat_verdict = (
-            "PASS — AUC ≈ 0.5 after conditioning on (year × plate-count quartile). "
-            "Any residual in the unstratified probe was year-structural signal, not per-row leakage."
-        )
     else:
-        shuffle_strat_auc_str = f"{shuffle_strat_auc:.4f}"
-        shuffle_strat_verdict = (
-            f"FAIL — stratified AUC {shuffle_strat_auc:.4f} deviates from 0.5 "
-            f"even after conditioning on (year × plate-count quartile). "
-            f"Per-row feature-label leakage beyond year confound is likely."
-        )
+        pooled  = shuffle_strat.get("pooled_auc")
+        wmean   = shuffle_strat.get("per_cell_weighted_mean")
+        max_auc = shuffle_strat.get("per_cell_max")
+        min_auc = shuffle_strat.get("per_cell_min")
+        n_cells = shuffle_strat.get("n_cells_evaluable", 0)
+        cells   = shuffle_strat.get("cells") or []
+
+        if wmean is None:
+            shuffle_strat_block = (
+                f"- Pooled AUC (confounded): {pooled:.4f}\n"
+                f"- Per-cell AUC: _no evaluable cells (all too small or single-class)_"
+            )
+            shuffle_strat_verdict = "_inconclusive_"
+        else:
+            cell_rows = ["| year | quartile | n | pos-rate | AUC |",
+                         "|---|---|---|---|---|"]
+            for c in sorted(cells, key=lambda d: (d["year"], d["quartile"])):
+                cell_rows.append(
+                    f"| {c['year']} | {c['quartile']} | {c['n']:,} | "
+                    f"{c['pos_rate']:.3f} | {c['auc']:.4f} |"
+                )
+            cell_tbl = "\n".join(cell_rows)
+            shuffle_strat_block = (
+                f"- Pooled AUC on shuffled test set (confounded — preserves "
+                f"cross-cell structure): **{pooled:.4f}**\n"
+                f"- **Per-cell AUC** (the honest metric — within-cell only):\n"
+                f"  - evaluable cells (n ≥ 200, both classes present): **{n_cells}**\n"
+                f"  - weighted mean: **{wmean:.4f}**\n"
+                f"  - min: {min_auc:.4f}   max: **{max_auc:.4f}**\n\n"
+                f"{cell_tbl}"
+            )
+            # Gate: weighted-mean ~ 0.5 AND max <= 0.55
+            if 0.47 <= wmean <= 0.53 and max_auc <= 0.55:
+                shuffle_strat_verdict = (
+                    f"PASS — within-cell AUC ≈ 0.5 (wmean {wmean:.4f}, "
+                    f"max {max_auc:.4f}). The unstratified 0.5825 was entirely "
+                    f"cross-cell / year-structural signal, not per-row leakage."
+                )
+            else:
+                shuffle_strat_verdict = (
+                    f"FAIL — within-cell AUC elevated (wmean {wmean:.4f}, "
+                    f"max {max_auc:.4f}). Per-row feature-label leakage beyond "
+                    f"(year × count-quartile) conditioning is likely."
+                )
 
     ts_auc = results.get("time_shift_auc")
     if ts_auc is None:
@@ -552,12 +645,11 @@ def main():
         results["target_shuffle_auc"] = probe_target_shuffle(X, y, cat_features, meta, task_type)
         print(f"    AUC = {results['target_shuffle_auc']:.4f}")
 
-    with timed("Probe 2b: target-shuffle within (year x count-quartile)"):
-        results["target_shuffle_stratified_auc"] = probe_target_shuffle_stratified(
+    with timed("Probe 2b: target-shuffle within (year x count-quartile), per-cell AUC"):
+        results["target_shuffle_stratified"] = probe_target_shuffle_stratified(
             X, y, cat_features, meta, task_type
         )
-        if results["target_shuffle_stratified_auc"] is not None:
-            print(f"    AUC = {results['target_shuffle_stratified_auc']:.4f}")
+        # function prints its own diagnostics
 
     with timed("Probe 3: time-shift sensitivity"):
         results["time_shift_auc"] = probe_time_shift(X, y, cat_features, task_type)
