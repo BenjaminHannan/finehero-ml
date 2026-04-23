@@ -178,7 +178,20 @@ def probe_target_shuffle_stratified(X, y, cat_features, meta, task_type):
         print("    [skipped] no plate_prior_ticket_count in X")
         return None
 
-    years = pd.to_datetime(meta["issue_date"], errors="coerce").dt.year.fillna(-1).astype(int).values
+    # Use the index alignment of X/meta. Drop rows with invalid issue_date —
+    # they can't be assigned a year cell. (Without this, pandas' NaT-year
+    # sentinel leaks through as int64.min and overflows cell-id arithmetic.)
+    _yr_series = pd.to_datetime(meta["issue_date"], errors="coerce").dt.year
+    valid_mask = _yr_series.notna().to_numpy()
+    if not valid_mask.all():
+        dropped = int((~valid_mask).sum())
+        print(f"    [note] dropping {dropped:,} rows with invalid issue_date")
+        X    = X.iloc[valid_mask].reset_index(drop=True)
+        y    = y[valid_mask]
+        meta = meta.iloc[valid_mask].reset_index(drop=True)
+        _yr_series = _yr_series[valid_mask].reset_index(drop=True)
+
+    years = _yr_series.astype(np.int64).to_numpy()
     counts = X["plate_prior_ticket_count"].to_numpy()
 
     # Per-year quartiles so each year's boundaries match that year's
@@ -555,11 +568,12 @@ Shuffle `y` within each fiscal year, retrain. A leak-free pipeline returns AUC �
 - Result: AUC = {shuffle_auc_str}
 - Status: {shuffle_verdict}
 
-### Probe 1b — Stratified target-shuffle (year × plate-count quartile)
+### Probe 1b — Stratified target-shuffle (year × plate-count quartile), per-cell AUC
 
-The unstratified probe leaves the `plate_prior_*` cumulative counts encoding year indirectly — so AUC > 0.5 can come from the model inferring year rather than from real leakage. This variant shuffles `y` within (fiscal year × per-year plate-count quartile) cells. Any remaining AUC > 0.5 must come from per-row feature-label signal that survives conditioning on year AND count level.
+The unstratified probe leaves the `plate_prior_*` cumulative counts encoding year indirectly — so AUC > 0.5 can come from the model inferring year rather than from real leakage. This variant shuffles `y` within (fiscal year × per-year plate-count quartile) cells, retrains, then computes AUC **within each test-set cell separately** — pooled AUC after within-cell shuffle is confounded because it still rewards cross-cell ranking driven by stable cell-level base rates. Per-cell AUC ≈ 0.5 is the honest evidence of no per-row leakage.
 
-- Result: AUC = {shuffle_strat_auc_str}
+{shuffle_strat_block}
+
 - Status: {shuffle_strat_verdict}
 
 ## Probe 2 — Time-shift sensitivity probe
