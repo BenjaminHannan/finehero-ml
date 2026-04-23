@@ -515,7 +515,16 @@ def engineer_features() -> None:
     # --- Plate history (leave-one-out, chronological) ---
     rolling_feature_cols: list[str] = []
     if plate_col and date_col:
-        global_mean = float(df["won"].mean())
+        # Smoothing constant: mean of `won` over the CHRONOLOGICAL 80% training
+        # slice only. Using the full-dataset mean would leak label info from the
+        # eventual test slice into every row's smoothed prior via the
+        # (k * global_mean) term. argsort places NaT at the end, so order[:cut]
+        # is the earliest 80% of valid-dated rows.
+        _order = pd.to_datetime(df[date_col], errors="coerce").argsort().values
+        _cut   = int(len(df) * 0.80)
+        global_mean = float(df["won"].iloc[_order[:_cut]].mean())
+        print(f"  Smoothing global_mean (train-slice 80%): {global_mean:.6f}  "
+              f"(full-dataset mean was {float(df['won'].mean()):.6f})")
         plate_feats, history_map = _compute_plate_history(df, plate_col, date_col, global_mean)
         df["plate_prior_ticket_count"] = plate_feats["plate_prior_ticket_count"].values
         df["plate_prior_win_rate"]     = plate_feats["plate_prior_win_rate"].values
