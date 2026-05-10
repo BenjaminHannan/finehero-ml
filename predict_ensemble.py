@@ -65,7 +65,8 @@ def _build_values_for_row(row, raw, plate_history):
     agency       = predict._get(row, agency_col, "UNKNOWN")
     license_type = predict._get(row, license_col, "UNKNOWN")
     state        = predict._get(row, state_col, "UNKNOWN")
-    plate        = predict._get(row, plate_col, "UNKNOWN")
+    # Canonicalize plate (uppercase + sentinel map) for plate_history_map lookup.
+    plate        = predict.canonicalize_plate(predict._get(row, plate_col, "UNKNOWN"))
 
     issuer_code                       = predict._get(row, predict._pick_col(raw, "issuer_code"), "UNKNOWN")
     issuer_command                    = predict._get(row, predict._pick_col(raw, "issuer_command"), "UNKNOWN")

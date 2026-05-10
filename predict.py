@@ -36,10 +36,23 @@ PLATE_SMOOTH_K = 10
 def _load_calibrator():
     """Return the fitted IsotonicRegression, or None if unavailable.
 
-    The calibrator was fit on the chronological last 10% of training (n=80k).
-    Applying it to raw CatBoost predict_proba outputs takes ECE from 0.152 to
-    0.023 on the held-out test set; AUC is preserved (isotonic is monotone).
-    See LIMITATIONS.md §"Probability threshold".
+    The calibrator is fit on the chronological last 10% of training (n=80k).
+    Applying it via `_apply_calibrator` takes calibrated ECE on the 200k
+    holdout to ~0.023 from ~0.152 raw; AUC is preserved because isotonic
+    is monotone. See LIMITATIONS.md §"Probability threshold".
+
+    Note on provenance: the currently-shipped `models/isotonic_calibrator.joblib`
+    has `auc_test_raw≈0.8737`, closer to the ensemble's 0.874 than to
+    CatBoost-alone's 0.8694 — indicating the artifact was historically fit on
+    the rank-blended probability average, not on single CatBoost output.
+    `predict_ensemble.py`'s gating on `prob_avg` is matched to that provenance.
+    Applying the same artifact in `predict.py` (single CatBoost) operates
+    slightly off-distribution — empirically still well-calibrated because the
+    three model heads use compatible class-imbalance reweighting and produce
+    similar raw distributions, but the dispute_threshold.json's `score_column`
+    label of "prob_avg_calibrated" is the documented invariant.
+
+    To rebuild on the single-CatBoost path: `python -m src.build_calibrator_and_threshold`.
     """
     if not os.path.exists(CALIBRATOR_PATH):
         return None
@@ -164,6 +177,28 @@ def _is_missing_value(v) -> bool:
         pass
     s = str(v).strip().upper()
     return (not s) or (s in _MISS_SENTINELS)
+
+
+def canonicalize_plate(plate) -> str:
+    """Mirror of engineer.py:692-695 plate_id canonicalization. Used to key
+    the plate_history_map at lookup time. Must stay byte-identical to the
+    training-time normalization: `.strip().upper()` plus sentinel mapping
+    {"NAN", "NONE", ""} -> "UNKNOWN". Without this, mixed-case plates and
+    literal `'nan'`/`'none'` strings (which round-trip through pandas
+    CSV write of Python NaN) miss the per-plate lookup and silently fall
+    through to the global-mean branch, losing the model's strongest
+    feature."""
+    if plate is None:
+        return "UNKNOWN"
+    try:
+        if pd.isnull(plate):
+            return "UNKNOWN"
+    except (TypeError, ValueError):
+        pass
+    s = str(plate).strip().upper()
+    if not s or s in {"NAN", "NONE"}:
+        return "UNKNOWN"
+    return s
 
 
 def _parse_hours_kind(s) -> str:
@@ -293,8 +328,14 @@ def _check_feature_drift(df, audit, *, sample_label="row"):
     of warnings as strings. Empty list = clean.
 
     Two checks per feature:
-      1. Null-rate drift. If a feature was rarely null in training (≤5%) but
-         is null on this row, flag it. This is the rolling-prior bug signature.
+      1. Null-rate drift. If a feature's live null rate exceeds its training
+         null rate by more than `null_rate_drift_threshold` (default 0.20,
+         absolute probability units), flag it. So a feature that was <=80%
+         null in training but is 100% null at inference fires; one that was
+         already 90% null in training stays quiet at 100% live. This is
+         tuned to catch the rolling-prior bug class (training ~0% null,
+         inference 100% null = delta 1.0) while tolerating high-baseline-null
+         features (pvqr-only columns) that are routinely missing.
       2. Numeric range. If a numeric feature's value falls outside the
          training [p01, p99] expanded by `range_padding`, flag it.
 
@@ -304,7 +345,7 @@ def _check_feature_drift(df, audit, *, sample_label="row"):
     if audit is None:
         return ["[skew] feature_audit.joblib missing — drift checks disabled"]
     feature_audit = audit.get("feature_audit", {})
-    null_threshold = audit.get("null_rate_drift_threshold", 0.5)
+    null_threshold = audit.get("null_rate_drift_threshold", 0.20)
     range_padding  = audit.get("range_padding", 0.10)
 
     warnings = []
@@ -552,7 +593,9 @@ def predict_ticket() -> float:
     agency = _get(row, agency_col, "UNKNOWN")
     license_type = _get(row, license_col, "UNKNOWN")
     state = _get(row, state_col, "UNKNOWN")
-    plate = _get(row, plate_col, "UNKNOWN")
+    # Canonicalize plate the same way engineer.py:692-695 does, so the
+    # plate_history_map lookup hits on mixed-case plates and sentinel strings.
+    plate = canonicalize_plate(_get(row, plate_col, "UNKNOWN"))
 
     # pvqr categoricals
     issuer_code                      = _get(row, _pick_col(raw, "issuer_code"), "UNKNOWN")
