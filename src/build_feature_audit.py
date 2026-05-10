@@ -76,8 +76,12 @@ def main():
         "n_training_rows": int(len(df)),
         "feature_names": feature_names,
         # Default drift threshold for null rate — features whose live null rate
-        # differs from training by more than this trigger a warning.
-        "null_rate_drift_threshold": 0.5,
+        # exceeds the training null rate by more than this delta (in absolute
+        # probability units) trigger a warning. 0.20 = "live 100% null on a
+        # feature that was <=80% null in training fires." Originally 0.50,
+        # which let 5%–49% training-null features flip to 100% null silently
+        # — the exact failure class the audit is supposed to detect.
+        "null_rate_drift_threshold": 0.20,
         # If a feature's live value falls outside [training p01 - delta, training p99 + delta]
         # for delta = drift_range_padding * (p99 - p01), warn.
         "range_padding":             0.10,
