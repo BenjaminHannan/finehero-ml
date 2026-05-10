@@ -38,7 +38,7 @@ CAT_FEATURES_PATH  = os.path.join(MODELS_DIR, "cat_features.joblib")
 PLATE_HISTORY_PATH = os.path.join(MODELS_DIR, "plate_history_map.joblib")
 VIOLATIONS_PATH    = os.path.join(DATA_DIR, "violations_raw.csv")
 
-DISPUTE_THRESHOLD = predict.DISPUTE_THRESHOLD
+DISPUTE_THRESHOLD = predict.DISPUTE_THRESHOLD  # fallback only; real value loaded from dispute_threshold.json
 
 
 def _build_values_for_row(row, raw, plate_history):
@@ -250,8 +250,17 @@ def predict_ticket_ensemble():
     row, actually_won = predict._pick_disputed_row(raw)
     values, display, plate = _build_values_for_row(row, raw, plate_history)
 
+    # All three models trained on the same features.csv have the rolling-prior
+    # NaN bug. Apply the inference-time fallback (population means) before
+    # any encoder transformation. See LIMITATIONS.md §"Live-data drift".
+    rolling_fallback = predict._load_rolling_prior_means()
+    if rolling_fallback is None:
+        print("  [WARN] models/rolling_prior_means.joblib not found — rolling "
+              "priors stay NaN. Run `python -m src.build_rolling_prior_means`.")
+
     # --- CatBoost row (strings for cats) ---
     cb_row = pd.DataFrame([{f: values.get(f, np.nan) for f in feature_names}])
+    predict._apply_rolling_prior_fallback(cb_row, rolling_fallback)
     for c in cat_features:
         if c in cb_row.columns:
             cb_row[c] = cb_row[c].fillna("UNKNOWN").astype(str).replace(
@@ -262,6 +271,7 @@ def predict_ticket_ensemble():
     # LGB's feature order is the same as CatBoost's feature_names (both trained
     # on the same features.csv with meta cols dropped).
     lgb_row = pd.DataFrame([{f: values.get(f, np.nan) for f in feature_names}])
+    predict._apply_rolling_prior_fallback(lgb_row, rolling_fallback)
     for c in cat_features:
         if c in lgb_row.columns:
             lgb_row[c] = lgb_row[c].fillna("UNKNOWN").astype(str).replace(
@@ -272,6 +282,7 @@ def predict_ticket_ensemble():
 
     # --- XGB row (ordinal-encoded + category dtype) ---
     xgb_row = pd.DataFrame([{f: values.get(f, np.nan) for f in feature_names}])
+    predict._apply_rolling_prior_fallback(xgb_row, rolling_fallback)
     for c in cat_features:
         if c in xgb_row.columns:
             xgb_row[c] = xgb_row[c].fillna("UNKNOWN").astype(str).replace(
@@ -290,7 +301,17 @@ def predict_ticket_ensemble():
 
     avail = [p for p in (pct_cb, pct_lgb, pct_xgb) if p is not None]
     rank_blend = float(np.mean(avail)) if avail else None
-    prob_avg   = float(np.mean([prob_cb, prob_lgb, prob_xgb]))
+    prob_avg_raw = float(np.mean([prob_cb, prob_lgb, prob_xgb]))
+
+    # Apply isotonic calibration to the probability average. dispute_threshold.json
+    # was tuned on this calibrated value (score_column = "prob_avg_calibrated").
+    calibrator = predict._load_calibrator()
+    if calibrator is not None:
+        prob_avg = float(calibrator.predict(np.asarray([prob_avg_raw]))[0])
+    else:
+        prob_avg = prob_avg_raw
+
+    threshold, policy = predict._load_threshold()
 
     # --- Display ---
     print(f"\n{'-'*56}")
@@ -304,14 +325,18 @@ def predict_ticket_ensemble():
           f"    CatBoost        {prob_cb*100:5.1f}%")
     print(f"    LightGBM        {prob_lgb*100:5.1f}%   (test-set percentile: {pct_lgb*100:5.1f}%)")
     print(f"    XGBoost         {prob_xgb*100:5.1f}%   (test-set percentile: {pct_xgb*100:5.1f}%)")
+    cal_label = "calibrated" if calibrator is not None else "raw (no calibrator found)"
     print(f"\n  Blends:")
-    print(f"    Probability avg  {prob_avg*100:5.1f}%")
+    print(f"    Probability avg  {prob_avg*100:5.1f}%   "
+          f"({cal_label}; raw was {prob_avg_raw*100:.1f}%)")
     if rank_blend is not None:
-        print(f"    Rank-percentile  {rank_blend*100:5.1f}%  <- this is the AUC-optimal blend")
+        print(f"    Rank-percentile  {rank_blend*100:5.1f}%  <- AUC-optimal but not a probability")
 
-    # Verdict off the probability average (most interpretable as "chance")
+    # Verdict off the calibrated probability average (matches what
+    # dispute_threshold.json was tuned on).
     verdict_prob = prob_avg
-    if verdict_prob >= DISPUTE_THRESHOLD:
+    print(f"  Threshold:        {threshold*100:.1f}%  (policy: {policy})")
+    if verdict_prob >= threshold:
         verdict = "Worth disputing"
         advice = "Gather evidence (photos, receipts, signage) and submit a dispute."
     else:
@@ -326,15 +351,16 @@ def predict_ticket_ensemble():
     elif actually_won:
         print("  Actual outcome:   WON")
         print(f"  Ensemble was:     "
-              f"{'CORRECT' if verdict_prob >= DISPUTE_THRESHOLD else 'WRONG'}")
+              f"{'CORRECT' if verdict_prob >= threshold else 'WRONG'}")
     else:
         print("  Actual outcome:   LOST")
         print(f"  Ensemble was:     "
-              f"{'CORRECT' if verdict_prob < DISPUTE_THRESHOLD else 'WRONG'}")
+              f"{'CORRECT' if verdict_prob < threshold else 'WRONG'}")
     print(f"{'-'*56}\n")
 
     return {"catboost": prob_cb, "lightgbm": prob_lgb, "xgboost": prob_xgb,
-            "prob_avg": prob_avg, "rank_blend": rank_blend,
+            "prob_avg_raw": prob_avg_raw, "prob_avg": prob_avg,
+            "rank_blend": rank_blend, "threshold": threshold,
             "actually_won": actually_won}
 
 
