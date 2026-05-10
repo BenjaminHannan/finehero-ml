@@ -19,8 +19,9 @@ import pandas as pd
 from catboost import CatBoostClassifier
 from sklearn.metrics import roc_auc_score
 
-MODELS_DIR = r"C:\Users\benja\Downloads\finehero-ml\models"
-DATA_DIR   = r"C:\Users\benja\Downloads\finehero-ml\data"
+ROOT = os.path.dirname(os.path.abspath(__file__))
+MODELS_DIR = os.path.join(ROOT, "models")
+DATA_DIR   = os.path.join(ROOT, "data")
 CATBOOST_PATH = os.path.join(MODELS_DIR, "catboost_model.cbm")
 METADATA_PATH = os.path.join(MODELS_DIR, "metadata.json")
 TEST_SET_PATH = os.path.join(DATA_DIR, "test_set.joblib")

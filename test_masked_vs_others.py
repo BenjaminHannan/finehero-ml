@@ -21,8 +21,9 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import predict
 import test_live_nyc_tickets as t
 
-MODELS = r"C:\Users\benja\Downloads\finehero-ml\models"
-DATA   = r"C:\Users\benja\Downloads\finehero-ml\data"
+ROOT = os.path.dirname(os.path.abspath(__file__))
+MODELS = os.path.join(ROOT, "models")
+DATA   = os.path.join(ROOT, "data")
 
 
 def ece(p, y, n_bins=15):

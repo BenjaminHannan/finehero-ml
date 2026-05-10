@@ -29,8 +29,9 @@ from sklearn.metrics import (
     f1_score, precision_score, recall_score, accuracy_score, roc_auc_score
 )
 
-MODELS_DIR = r"C:\Users\benja\Downloads\finehero-ml\models"
-DATA_DIR   = r"C:\Users\benja\Downloads\finehero-ml\data"
+ROOT = os.path.dirname(os.path.abspath(__file__))
+MODELS_DIR = os.path.join(ROOT, "models")
+DATA_DIR   = os.path.join(ROOT, "data")
 
 CATBOOST_PATH   = os.path.join(MODELS_DIR, "catboost_model.cbm")
 CALIBRATOR_PATH = os.path.join(MODELS_DIR, "isotonic_calibrator.joblib")

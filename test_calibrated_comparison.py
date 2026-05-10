@@ -23,8 +23,9 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from test_hypothetical_tickets import make_scenarios
 
-MODELS_DIR = r"C:\Users\benja\Downloads\finehero-ml\models"
-DATA_DIR   = r"C:\Users\benja\Downloads\finehero-ml\data"
+ROOT = os.path.dirname(os.path.abspath(__file__))
+MODELS_DIR = os.path.join(ROOT, "models")
+DATA_DIR   = os.path.join(ROOT, "data")
 CATBOOST_PATH      = os.path.join(MODELS_DIR, "catboost_model.cbm")
 METADATA_PATH      = os.path.join(MODELS_DIR, "metadata.json")
 CAT_FEATURES_PATH  = os.path.join(MODELS_DIR, "cat_features.joblib")

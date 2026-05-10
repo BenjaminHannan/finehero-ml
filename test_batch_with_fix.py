@@ -24,8 +24,9 @@ from sklearn.metrics import roc_auc_score, f1_score, precision_score, recall_sco
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import test_live_nyc_tickets as t
 
-MODELS_DIR = r"C:\Users\benja\Downloads\finehero-ml\models"
-DATA_DIR   = r"C:\Users\benja\Downloads\finehero-ml\data"
+ROOT = os.path.dirname(os.path.abspath(__file__))
+MODELS_DIR = os.path.join(ROOT, "models")
+DATA_DIR   = os.path.join(ROOT, "data")
 
 
 def expected_calibration_error(probs, y, n_bins=15):
@@ -128,14 +129,35 @@ def main():
     threshold = cfg["default_threshold"]; policy = cfg["default_policy"]
     print(f"   threshold={threshold:.3f} (policy: {policy})")
 
-    print(" Caching rolling-prior population means...")
-    use_cols = lambda c: "prior_" in c and ("30D" in c or "90D" in c or "365D" in c)
-    fcsv = pd.read_csv(os.path.join(DATA_DIR, "features.csv"), usecols=use_cols, low_memory=False)
-    prior_means = {c: float(fcsv[c].mean()) for c in fcsv.columns}
-    days_since_means = {"days_since_plate_last_ticket": 365.0,
-                        "days_since_plate_last_win": 365.0,
-                        "days_since_issuer_last_ticket": 365.0}
-    issuer_bayes_default = 0.18
+    # Read the SAME artifact production uses, instead of recomputing locally.
+    # Older versions of this script recomputed means inline and hardcoded
+    # issuer_bayes_default = 0.18, which diverged from the production
+    # base-rate fallback (~0.236). See docs/rolling_prior_investigation.md §12
+    # for the verdict-flipping consequence on the borderline winner 9070812812.
+    rolling_means_path = os.path.join(MODELS_DIR, "rolling_prior_means.joblib")
+    if os.path.exists(rolling_means_path):
+        artifact = joblib.load(rolling_means_path)
+        prior_means = artifact["rolling_prior_means"]
+        days_since_means = artifact.get("days_since_defaults", {})
+        issuer_bayes_default = artifact.get("issuer_bayes_default", 0.18)
+        print(f"   loaded rolling_prior_means.joblib: "
+              f"{len(prior_means)} rolling priors, "
+              f"issuer_bayes_default = {issuer_bayes_default:.4f}")
+    else:
+        # Fallback: recompute from features.csv if the artifact is missing.
+        print("   [WARN] rolling_prior_means.joblib missing — recomputing from features.csv")
+        use_cols = lambda c: "prior_" in c and ("30D" in c or "90D" in c or "365D" in c)
+        fcsv = pd.read_csv(os.path.join(DATA_DIR, "features.csv"),
+                           usecols=use_cols, low_memory=False)
+        prior_means = {c: float(fcsv[c].mean()) for c in fcsv.columns}
+        days_since_means = {"days_since_plate_last_ticket": 365.0,
+                            "days_since_plate_last_win": 365.0,
+                            "days_since_issuer_last_ticket": 30.0}
+        # Compute the same base-rate fallback build_rolling_prior_means.py uses
+        issuer_bayes_default = float(
+            pd.read_csv(os.path.join(DATA_DIR, "features.csv"),
+                        usecols=["won"], low_memory=False)["won"].mean()
+        )
     print(f"   {len(prior_means)} rolling-prior features cached\n")
 
     # ----- 1. Fetch & dedupe -----

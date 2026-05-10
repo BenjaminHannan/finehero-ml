@@ -21,7 +21,8 @@ import pandas as pd
 from catboost import CatBoostClassifier
 
 # Use the trained model from the parent (non-worktree) repo
-MODELS_DIR = r"C:\Users\benja\Downloads\finehero-ml\models"
+ROOT = os.path.dirname(os.path.abspath(__file__))
+MODELS_DIR = os.path.join(ROOT, "models")
 CATBOOST_PATH      = os.path.join(MODELS_DIR, "catboost_model.cbm")
 METADATA_PATH      = os.path.join(MODELS_DIR, "metadata.json")
 CAT_FEATURES_PATH  = os.path.join(MODELS_DIR, "cat_features.joblib")

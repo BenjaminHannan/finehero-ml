@@ -25,8 +25,9 @@ from sklearn.metrics import roc_auc_score
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import predict  # reuse helpers
 
-MODELS_DIR = r"C:\Users\benja\Downloads\finehero-ml\models"
-DATA_DIR   = r"C:\Users\benja\Downloads\finehero-ml\data"
+ROOT = os.path.dirname(os.path.abspath(__file__))
+MODELS_DIR = os.path.join(ROOT, "models")
+DATA_DIR   = os.path.join(ROOT, "data")
 
 # NYC fiscal year endpoints (FY = Jul 1 – Jun 30)
 PVQR_FISCAL_ENDPOINTS = {
@@ -129,7 +130,8 @@ def build_feature_row(row, plate_history, feature_names):
     agency = predict._get(row, agency_col, "UNKNOWN")
     license_type = predict._get(row, license_col, "UNKNOWN")
     state = predict._get(row, state_col, "UNKNOWN")
-    plate = predict._get(row, plate_col, "UNKNOWN")
+    # Canonicalize plate the same way engineer.py does so plate_history_map hits.
+    plate = predict.canonicalize_plate(predict._get(row, plate_col, "UNKNOWN"))
 
     issuer_code         = predict._get(row, predict._pick_col(raw_cols, "issuer_code"), "UNKNOWN")
     issuer_command      = predict._get(row, predict._pick_col(raw_cols, "issuer_command"), "UNKNOWN")
